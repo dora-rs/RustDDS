@@ -1,6 +1,7 @@
 use std::{marker::PhantomData, ops::Deref};
 
 use bytes::Bytes;
+use serde::de::DeserializeSeed;
 
 use crate::{
   dds::adapters::*, messages::submessages::submessages::RepresentationIdentifier, Keyed,
@@ -76,21 +77,26 @@ pub struct DAWrapper<DA> {
 }
 
 // first, implement no_key DA
-impl<D, DA> no_key::DeserializerAdapter<NoKeyWrapper<D>> for DAWrapper<DA>
+impl<'d, I, D, DA> no_key::DeserializerAdapter<NoKeyWrapper<D>> for DAWrapper<DA>
 where
-  DA: no_key::DeserializerAdapter<D>,
+  DA: no_key::DeserializerAdapter<D, Input = I>,
 {
   type Error = DA::Error;
+  type Input = I;
 
   fn supported_encodings() -> &'static [RepresentationIdentifier] {
     DA::supported_encodings()
   }
 
-  fn from_bytes(
+  fn from_bytes_seed<'de, S>(
     input_bytes: &[u8],
     encoding: RepresentationIdentifier,
-  ) -> Result<NoKeyWrapper<D>, DA::Error> {
-    DA::from_bytes(input_bytes, encoding).map(|d| NoKeyWrapper::<D> { d })
+    seed: S,
+  ) -> Result<NoKeyWrapper<D>, Self::Error>
+  where
+    S: DeserializeSeed<'de, Value = Self::Input>,
+  {
+    DA::from_bytes_seed(input_bytes, encoding, seed).map(|d| NoKeyWrapper::<D> { d })
   }
 }
 

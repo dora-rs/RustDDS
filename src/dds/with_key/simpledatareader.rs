@@ -9,7 +9,7 @@ use std::{
 };
 
 use futures::stream::{FusedStream, Stream};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize};
 use mio_extras::channel as mio_channel;
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -127,10 +127,10 @@ where
   }
 }
 
-impl<D: 'static, DA> SimpleDataReader<D, DA>
+impl<I, D: 'static, DA> SimpleDataReader<D, DA>
 where
   D: Keyed,
-  DA: DeserializerAdapter<D>,
+  DA: DeserializerAdapter<D, Input = I>,
 {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
@@ -221,11 +221,14 @@ where
     hash_to_key_map.insert(instance_key.hash_key(), instance_key);
   }
 
-  fn deserialize(
+  fn deserialize<'de>(
     timestamp: Timestamp,
     cc: &CacheChange,
     hash_to_key_map: &mut BTreeMap<KeyHash, D::K>,
-  ) -> ReadResult<DeserializedCacheChange<D>> {
+  ) -> ReadResult<DeserializedCacheChange<D>>
+  where
+    I: Deserialize<'de>,
+  {
     match cc.data_value {
       DDSData::Data {
         ref serialized_payload,
@@ -295,7 +298,10 @@ where
 
   /// Note: Always remember to call .drain_read_notifications() just before
   /// calling this one. Otherwise, new notifications may not appear.
-  pub fn try_take_one(&self) -> ReadResult<Option<DeserializedCacheChange<D>>> {
+  pub fn try_take_one<'de>(&self) -> ReadResult<Option<DeserializedCacheChange<D>>>
+  where
+    I: Deserialize<'de>,
+  {
     let is_reliable = matches!(
       self.qos_policy.reliability(),
       Some(policy::Reliability::Reliable { .. })
@@ -489,10 +495,11 @@ where
 {
 }
 
-impl<'a, D, DA> Stream for SimpleDataReaderStream<'a, D, DA>
+impl<'a, 'de, I, D, DA> Stream for SimpleDataReaderStream<'a, D, DA>
 where
-  D: Keyed + 'static,
-  DA: DeserializerAdapter<D>,
+  D: Keyed,
+  DA: DeserializerAdapter<D, Input = I>,
+  I: Deserialize<'de> + 'static,
 {
   type Item = ReadResult<DeserializedCacheChange<D>>;
 
@@ -533,10 +540,11 @@ where
   } // fn
 } // impl
 
-impl<'a, D, DA> FusedStream for SimpleDataReaderStream<'a, D, DA>
+impl<'a, 'de, I, D, DA> FusedStream for SimpleDataReaderStream<'a, D, DA>
 where
   D: Keyed + 'static,
-  DA: DeserializerAdapter<D>,
+  DA: DeserializerAdapter<D, Input = I>,
+  I: Deserialize<'de> + 'static,
 {
   fn is_terminated(&self) -> bool {
     false // Never terminate. This means it is always valid to call poll_next().
