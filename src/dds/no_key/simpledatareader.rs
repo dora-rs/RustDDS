@@ -5,7 +5,7 @@ use futures::stream::{FusedStream, Stream, StreamExt};
 use log::{debug, error, info, trace, warn};
 use mio_06::{self, Evented};
 use mio_08;
-use serde::Deserialize;
+use serde::{de::DeserializeSeed, Deserialize};
 
 use crate::{
   dds::{
@@ -55,6 +55,20 @@ where
     DA::Input: Deserialize<'de>,
   {
     match self.keyed_simpledatareader.try_take_one() {
+      Err(e) => Err(e),
+      Ok(None) => Ok(None),
+      Ok(Some(kdcc)) => match DeserializedCacheChange::<D>::from_keyed(kdcc) {
+        Some(dcc) => Ok(Some(dcc)),
+        None => Ok(None),
+      },
+    }
+  }
+
+  pub fn try_take_one_seed<'de, S>(&self, seed: S) -> ReadResult<Option<DeserializedCacheChange<D>>>
+  where
+    S: DeserializeSeed<'de, Value = DA::Input>,
+  {
+    match self.keyed_simpledatareader.try_take_one_seed(seed) {
       Err(e) => Err(e),
       Ok(None) => Ok(None),
       Ok(Some(kdcc)) => match DeserializedCacheChange::<D>::from_keyed(kdcc) {
