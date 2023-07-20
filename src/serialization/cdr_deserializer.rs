@@ -31,10 +31,7 @@ const REPR_IDS: [RepresentationIdentifier; 3] = [
   RepresentationIdentifier::PL_CDR_LE,
 ];
 
-impl<D> no_key::DeserializerAdapter<D> for CDRDeserializerAdapter<D>
-where
-  D: DeserializeOwned,
-{
+impl<D> no_key::DeserializerAdapter<D> for CDRDeserializerAdapter<D> {
   type Error = Error;
   type Input = D;
 
@@ -56,7 +53,7 @@ where
 
 impl<D> with_key::DeserializerAdapter<D> for CDRDeserializerAdapter<D>
 where
-  D: Keyed + DeserializeOwned,
+  D: Keyed,
   <D as Keyed>::K: DeserializeOwned, // Key should do this already?
 {
   fn key_from_bytes(input_bytes: &[u8], encoding: RepresentationIdentifier) -> Result<D::K> {
