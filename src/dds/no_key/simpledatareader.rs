@@ -110,6 +110,31 @@ where
       })
   }
 
+  pub fn as_async_stream_seed<'de, S>(
+    &self,
+    seed: S,
+  ) -> impl Stream<Item = ReadResult<DeserializedCacheChange<D>>> + FusedStream + '_
+  where
+    S: DeserializeSeed<'de, Value = DA::Input> + Clone + 'static,
+  {
+    self
+      .keyed_simpledatareader
+      .as_async_stream_seed(seed)
+      .filter_map(move |r| async {
+        // This is Stream::filter_map, so returning None means just skipping Item.
+        match r {
+          Err(e) => Some(Err(e)),
+          Ok(kdcc) => match DeserializedCacheChange::<D>::from_keyed(kdcc) {
+            None => {
+              info!("Got dispose from no_key topic.");
+              None
+            }
+            Some(dcc) => Some(Ok(dcc)),
+          },
+        }
+      })
+  }
+
   pub fn as_simple_data_reader_event_stream(
     &self,
   ) -> impl Stream<Item = ReadResult<DataReaderStatus>> + '_ {

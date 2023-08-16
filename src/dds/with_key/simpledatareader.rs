@@ -373,6 +373,13 @@ where
     }
   }
 
+  pub fn as_async_stream_seed<S>(&self, seed: S) -> SimpleDataReaderStreamSeed<S, D, DA> {
+    SimpleDataReaderStreamSeed {
+      simple_datareader: self,
+      seed,
+    }
+  }
+
   pub fn as_simple_data_reader_event_stream(&self) -> SimpleDataReaderEventStream<D, DA> {
     SimpleDataReaderEventStream {
       simple_datareader: self,
@@ -586,3 +593,76 @@ where
     Pin::new(&mut self.simple_datareader.status_receiver.as_async_stream()).poll_next(cx)
   } // fn
 } // impl
+
+pub struct SimpleDataReaderStreamSeed<
+  'a,
+  S,
+  D: Keyed + 'static,
+  DA: DeserializerAdapter<D> + 'static = CDRDeserializerAdapter<D>,
+> {
+  simple_datareader: &'a SimpleDataReader<D, DA>,
+  seed: S,
+}
+
+impl<'a, S, D, DA> Unpin for SimpleDataReaderStreamSeed<'a, S, D, DA>
+where
+  D: Keyed + 'static,
+  DA: DeserializerAdapter<D>,
+{
+}
+
+impl<'a, 'de, I, S, D, DA> Stream for SimpleDataReaderStreamSeed<'a, S, D, DA>
+where
+  D: Keyed,
+  DA: DeserializerAdapter<D, Input = I>,
+  S: DeserializeSeed<'de, Value = I> + Clone,
+{
+  type Item = ReadResult<DeserializedCacheChange<D>>;
+
+  // The full return type is now
+  // Poll<Option<Result<DeserializedCacheChange<D>>>
+  // Poll -> Ready or Pending
+  // Option -> Some = stream produces a value, None = stream has ended (does not
+  // occur) Result -> Ok = No DDS error, Err = DDS processing error
+  // (inner Option -> Some = there is new value/key, None = no new data yet)
+
+  fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    debug!("poll_next");
+    match self.simple_datareader.try_take_one_seed(self.seed.clone()) {
+      Err(e) =>
+      // DDS fails
+      {
+        Poll::Ready(Some(Err(e)))
+      }
+
+      // ok, got something
+      Ok(Some(d)) => Poll::Ready(Some(Ok(d))),
+
+      // No new data (yet)
+      Ok(None) => {
+        // Did not get any data.
+        // --> Store waker.
+        // 1. synchronously store waker to background thread (must rendezvous)
+        // 2. try take_bare again, in case something arrived just now
+        // 3. if nothing still, return pending.
+        self.simple_datareader.set_waker(Some(cx.waker().clone()));
+        match self.simple_datareader.try_take_one_seed(self.seed.clone()) {
+          Err(e) => Poll::Ready(Some(Err(e))),
+          Ok(Some(d)) => Poll::Ready(Some(Ok(d))),
+          Ok(None) => Poll::Pending,
+        }
+      }
+    } // match
+  } // fn
+}
+
+impl<'a, 'de, I, S, D, DA> FusedStream for SimpleDataReaderStreamSeed<'a, S, D, DA>
+where
+  D: Keyed + 'static,
+  DA: DeserializerAdapter<D, Input = I>,
+  S: DeserializeSeed<'de, Value = I> + Clone,
+{
+  fn is_terminated(&self) -> bool {
+    false // Never terminate. This means it is always valid to call poll_next().
+  }
+}
