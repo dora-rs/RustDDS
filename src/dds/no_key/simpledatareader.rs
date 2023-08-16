@@ -5,6 +5,7 @@ use futures::stream::{FusedStream, Stream, StreamExt};
 use log::{debug, error, info, trace, warn};
 use mio_06::{self, Evented};
 use mio_08;
+use serde::{de::DeserializeSeed, Deserialize};
 
 use crate::{
   dds::{
@@ -49,8 +50,25 @@ where
     self.keyed_simpledatareader.drain_read_notifications();
   }
 
-  pub fn try_take_one(&self) -> ReadResult<Option<DeserializedCacheChange<D>>> {
+  pub fn try_take_one<'de>(&self) -> ReadResult<Option<DeserializedCacheChange<D>>>
+  where
+    DA::Input: Deserialize<'de>,
+  {
     match self.keyed_simpledatareader.try_take_one() {
+      Err(e) => Err(e),
+      Ok(None) => Ok(None),
+      Ok(Some(kdcc)) => match DeserializedCacheChange::<D>::from_keyed(kdcc) {
+        Some(dcc) => Ok(Some(dcc)),
+        None => Ok(None),
+      },
+    }
+  }
+
+  pub fn try_take_one_seed<'de, S>(&self, seed: S) -> ReadResult<Option<DeserializedCacheChange<D>>>
+  where
+    S: DeserializeSeed<'de, Value = DA::Input>,
+  {
+    match self.keyed_simpledatareader.try_take_one_seed(seed) {
       Err(e) => Err(e),
       Ok(None) => Ok(None),
       Ok(Some(kdcc)) => match DeserializedCacheChange::<D>::from_keyed(kdcc) {
@@ -68,12 +86,40 @@ where
     self.keyed_simpledatareader.guid()
   }
 
-  pub fn as_async_stream(
+  pub fn as_async_stream<'de>(
     &self,
-  ) -> impl Stream<Item = ReadResult<DeserializedCacheChange<D>>> + FusedStream + '_ {
+  ) -> impl Stream<Item = ReadResult<DeserializedCacheChange<D>>> + FusedStream + '_
+  where
+    DA::Input: Deserialize<'de>,
+  {
     self
       .keyed_simpledatareader
       .as_async_stream()
+      .filter_map(move |r| async {
+        // This is Stream::filter_map, so returning None means just skipping Item.
+        match r {
+          Err(e) => Some(Err(e)),
+          Ok(kdcc) => match DeserializedCacheChange::<D>::from_keyed(kdcc) {
+            None => {
+              info!("Got dispose from no_key topic.");
+              None
+            }
+            Some(dcc) => Some(Ok(dcc)),
+          },
+        }
+      })
+  }
+
+  pub fn as_async_stream_seed<'de, S>(
+    &self,
+    seed: S,
+  ) -> impl Stream<Item = ReadResult<DeserializedCacheChange<D>>> + FusedStream + '_
+  where
+    S: DeserializeSeed<'de, Value = DA::Input> + Clone + 'static,
+  {
+    self
+      .keyed_simpledatareader
+      .as_async_stream_seed(seed)
       .filter_map(move |r| async {
         // This is Stream::filter_map, so returning None means just skipping Item.
         match r {

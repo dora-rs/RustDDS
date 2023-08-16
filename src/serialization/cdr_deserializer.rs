@@ -31,24 +31,29 @@ const REPR_IDS: [RepresentationIdentifier; 3] = [
   RepresentationIdentifier::PL_CDR_LE,
 ];
 
-impl<D> no_key::DeserializerAdapter<D> for CDRDeserializerAdapter<D>
-where
-  D: DeserializeOwned,
-{
+impl<D> no_key::DeserializerAdapter<D> for CDRDeserializerAdapter<D> {
   type Error = Error;
+  type Input = D;
 
   fn supported_encodings() -> &'static [RepresentationIdentifier] {
     &REPR_IDS
   }
 
-  fn from_bytes(input_bytes: &[u8], encoding: RepresentationIdentifier) -> Result<D> {
-    deserialize_from_cdr(input_bytes, encoding).map(|(d, _size)| d)
+  fn from_bytes_seed<'de, S>(
+    input_bytes: &[u8],
+    encoding: RepresentationIdentifier,
+    seed: S,
+  ) -> std::result::Result<D, Self::Error>
+  where
+    S: DeserializeSeed<'de, Value = Self::Input>,
+  {
+    deserialize_from_cdr_seed(input_bytes, encoding, seed).map(|(d, _size)| d)
   }
 }
 
 impl<D> with_key::DeserializerAdapter<D> for CDRDeserializerAdapter<D>
 where
-  D: Keyed + DeserializeOwned,
+  D: Keyed,
   <D as Keyed>::K: DeserializeOwned, // Key should do this already?
 {
   fn key_from_bytes(input_bytes: &[u8], encoding: RepresentationIdentifier) -> Result<D::K> {
@@ -181,6 +186,34 @@ where
 
     repr_id => Err(Error::NotSupported(format!(
       "Unknown serialization format. requested={:?}.",
+      repr_id
+    ))),
+  }
+}
+
+pub fn deserialize_from_cdr_seed<'de, S>(
+  input_bytes: &[u8],
+  encoding: RepresentationIdentifier,
+  seed: S,
+) -> Result<(<S as DeserializeSeed<'de>>::Value, usize)>
+where
+  S: DeserializeSeed<'de>,
+{
+  match encoding {
+    RepresentationIdentifier::CDR_LE | RepresentationIdentifier::PL_CDR_LE => {
+      let mut deserializer = CdrDeserializer::<LittleEndian>::new(input_bytes);
+      let t = seed.deserialize(&mut deserializer)?;
+      Ok((t, deserializer.serialized_data_count))
+    }
+
+    RepresentationIdentifier::CDR_BE | RepresentationIdentifier::PL_CDR_BE => {
+      let mut deserializer = CdrDeserializer::<BigEndian>::new(input_bytes);
+      let t = seed.deserialize(&mut deserializer)?;
+      Ok((t, deserializer.serialized_data_count))
+    }
+
+    repr_id => Err(Error::NotSupported(format!(
+      "Unknown representaiton identifier {:?}.",
       repr_id
     ))),
   }

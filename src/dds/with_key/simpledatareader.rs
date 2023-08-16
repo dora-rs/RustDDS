@@ -9,7 +9,10 @@ use std::{
 };
 
 use futures::stream::{FusedStream, Stream};
-use serde::de::DeserializeOwned;
+use serde::{
+  de::{DeserializeOwned, DeserializeSeed},
+  Deserialize,
+};
 use mio_extras::channel as mio_channel;
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -127,10 +130,10 @@ where
   }
 }
 
-impl<D: 'static, DA> SimpleDataReader<D, DA>
+impl<I, D: 'static, DA> SimpleDataReader<D, DA>
 where
   D: Keyed,
-  DA: DeserializerAdapter<D>,
+  DA: DeserializerAdapter<D, Input = I>,
 {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
@@ -221,11 +224,15 @@ where
     hash_to_key_map.insert(instance_key.hash_key(), instance_key);
   }
 
-  fn deserialize(
+  fn deserialize_seed<'de, S>(
     timestamp: Timestamp,
     cc: &CacheChange,
     hash_to_key_map: &mut BTreeMap<KeyHash, D::K>,
-  ) -> ReadResult<DeserializedCacheChange<D>> {
+    seed: S,
+  ) -> ReadResult<DeserializedCacheChange<D>>
+  where
+    S: DeserializeSeed<'de, Value = I>,
+  {
     match cc.data_value {
       DDSData::Data {
         ref serialized_payload,
@@ -235,7 +242,7 @@ where
           .iter()
           .find(|r| **r == serialized_payload.representation_identifier)
         {
-          match DA::from_bytes(&serialized_payload.value, *recognized_rep_id) {
+          match DA::from_bytes_seed(&serialized_payload.value, *recognized_rep_id, seed) {
             // Data update, decoded ok
             Ok(payload) => {
               let p = Sample::Value(payload);
@@ -295,7 +302,19 @@ where
 
   /// Note: Always remember to call .drain_read_notifications() just before
   /// calling this one. Otherwise, new notifications may not appear.
-  pub fn try_take_one(&self) -> ReadResult<Option<DeserializedCacheChange<D>>> {
+  pub fn try_take_one<'de>(&self) -> ReadResult<Option<DeserializedCacheChange<D>>>
+  where
+    I: Deserialize<'de>,
+  {
+    Self::try_take_one_seed(self, PhantomData)
+  }
+
+  /// Note: Always remember to call .drain_read_notifications() just before
+  /// calling this one. Otherwise, new notifications may not appear.
+  pub fn try_take_one_seed<'de, S>(&self, seed: S) -> ReadResult<Option<DeserializedCacheChange<D>>>
+  where
+    S: DeserializeSeed<'de, Value = I>,
+  {
     let is_reliable = matches!(
       self.qos_policy.reliability(),
       Some(policy::Reliability::Reliable { .. })
@@ -319,7 +338,7 @@ where
       Some((ts, cc)) => (ts, cc),
     };
 
-    match Self::deserialize(timestamp, cc, hash_to_key_map) {
+    match Self::deserialize_seed(timestamp, cc, hash_to_key_map, seed) {
       Ok(dcc) => {
         read_state_ref.latest_instant = max(read_state_ref.latest_instant, timestamp);
         last_read_sequence_number.insert(dcc.writer_guid, dcc.sequence_number);
@@ -351,6 +370,13 @@ where
   pub fn as_async_stream(&self) -> SimpleDataReaderStream<D, DA> {
     SimpleDataReaderStream {
       simple_datareader: self,
+    }
+  }
+
+  pub fn as_async_stream_seed<S>(&self, seed: S) -> SimpleDataReaderStreamSeed<S, D, DA> {
+    SimpleDataReaderStreamSeed {
+      simple_datareader: self,
+      seed,
     }
   }
 
@@ -489,10 +515,11 @@ where
 {
 }
 
-impl<'a, D, DA> Stream for SimpleDataReaderStream<'a, D, DA>
+impl<'a, 'de, I, D, DA> Stream for SimpleDataReaderStream<'a, D, DA>
 where
-  D: Keyed + 'static,
-  DA: DeserializerAdapter<D>,
+  D: Keyed,
+  DA: DeserializerAdapter<D, Input = I>,
+  I: Deserialize<'de> + 'static,
 {
   type Item = ReadResult<DeserializedCacheChange<D>>;
 
@@ -533,10 +560,11 @@ where
   } // fn
 } // impl
 
-impl<'a, D, DA> FusedStream for SimpleDataReaderStream<'a, D, DA>
+impl<'a, 'de, I, D, DA> FusedStream for SimpleDataReaderStream<'a, D, DA>
 where
   D: Keyed + 'static,
-  DA: DeserializerAdapter<D>,
+  DA: DeserializerAdapter<D, Input = I>,
+  I: Deserialize<'de> + 'static,
 {
   fn is_terminated(&self) -> bool {
     false // Never terminate. This means it is always valid to call poll_next().
@@ -565,3 +593,76 @@ where
     Pin::new(&mut self.simple_datareader.status_receiver.as_async_stream()).poll_next(cx)
   } // fn
 } // impl
+
+pub struct SimpleDataReaderStreamSeed<
+  'a,
+  S,
+  D: Keyed + 'static,
+  DA: DeserializerAdapter<D> + 'static = CDRDeserializerAdapter<D>,
+> {
+  simple_datareader: &'a SimpleDataReader<D, DA>,
+  seed: S,
+}
+
+impl<'a, S, D, DA> Unpin for SimpleDataReaderStreamSeed<'a, S, D, DA>
+where
+  D: Keyed + 'static,
+  DA: DeserializerAdapter<D>,
+{
+}
+
+impl<'a, 'de, I, S, D, DA> Stream for SimpleDataReaderStreamSeed<'a, S, D, DA>
+where
+  D: Keyed,
+  DA: DeserializerAdapter<D, Input = I>,
+  S: DeserializeSeed<'de, Value = I> + Clone,
+{
+  type Item = ReadResult<DeserializedCacheChange<D>>;
+
+  // The full return type is now
+  // Poll<Option<Result<DeserializedCacheChange<D>>>
+  // Poll -> Ready or Pending
+  // Option -> Some = stream produces a value, None = stream has ended (does not
+  // occur) Result -> Ok = No DDS error, Err = DDS processing error
+  // (inner Option -> Some = there is new value/key, None = no new data yet)
+
+  fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    debug!("poll_next");
+    match self.simple_datareader.try_take_one_seed(self.seed.clone()) {
+      Err(e) =>
+      // DDS fails
+      {
+        Poll::Ready(Some(Err(e)))
+      }
+
+      // ok, got something
+      Ok(Some(d)) => Poll::Ready(Some(Ok(d))),
+
+      // No new data (yet)
+      Ok(None) => {
+        // Did not get any data.
+        // --> Store waker.
+        // 1. synchronously store waker to background thread (must rendezvous)
+        // 2. try take_bare again, in case something arrived just now
+        // 3. if nothing still, return pending.
+        self.simple_datareader.set_waker(Some(cx.waker().clone()));
+        match self.simple_datareader.try_take_one_seed(self.seed.clone()) {
+          Err(e) => Poll::Ready(Some(Err(e))),
+          Ok(Some(d)) => Poll::Ready(Some(Ok(d))),
+          Ok(None) => Poll::Pending,
+        }
+      }
+    } // match
+  } // fn
+}
+
+impl<'a, 'de, I, S, D, DA> FusedStream for SimpleDataReaderStreamSeed<'a, S, D, DA>
+where
+  D: Keyed + 'static,
+  DA: DeserializerAdapter<D, Input = I>,
+  S: DeserializeSeed<'de, Value = I> + Clone,
+{
+  fn is_terminated(&self) -> bool {
+    false // Never terminate. This means it is always valid to call poll_next().
+  }
+}

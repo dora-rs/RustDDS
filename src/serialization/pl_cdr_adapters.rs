@@ -107,12 +107,20 @@ where
   D: PlCdrDeserialize,
 {
   type Error = PlCdrDeserializeError;
+  type Input = D;
 
   fn supported_encodings() -> &'static [RepresentationIdentifier] {
     &REPR_IDS
   }
 
-  fn from_bytes(input_bytes: &[u8], encoding: RepresentationIdentifier) -> Result<D, Self::Error> {
+  fn from_bytes_seed<'de, S>(
+    input_bytes: &[u8],
+    encoding: RepresentationIdentifier,
+    _seed: S,
+  ) -> Result<D, Self::Error>
+  where
+    S: serde::de::DeserializeSeed<'de, Value = Self::Input>,
+  {
     match encoding {
       RepresentationIdentifier::PL_CDR_LE | RepresentationIdentifier::PL_CDR_BE => {
         D::from_pl_cdr_bytes(input_bytes, encoding)

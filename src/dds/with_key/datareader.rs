@@ -10,6 +10,7 @@ use log::{debug, error, info, trace, warn};
 use mio_06::{self, Evented};
 use mio_08;
 use futures::stream::{FusedStream, Stream};
+use serde::Deserialize;
 
 use super::datasample_cache::DataSampleCache;
 use crate::{
@@ -75,7 +76,7 @@ pub struct DataReader<D: Keyed, DA: DeserializerAdapter<D> = CDRDeserializerAdap
   datasample_cache: DataSampleCache<D>, // DataReader-local cache of deserialized samples
 }
 
-impl<D: 'static, DA> DataReader<D, DA>
+impl<'de, D: 'static, DA> DataReader<D, DA>
 where
   D: Keyed,
   DA: DeserializerAdapter<D>,
@@ -88,7 +89,14 @@ where
       datasample_cache: dsc,
     }
   }
+}
 
+impl<'de, I, D: 'static, DA> DataReader<D, DA>
+where
+  D: Keyed,
+  DA: DeserializerAdapter<D, Input = I>,
+  I: Deserialize<'de>,
+{
   // Gets all unseen cache_changes from the TopicCache. Deserializes
   // the serialized payload and stores the DataSamples (the actual data and the
   // samplestate) to local container, datasample_cache.
@@ -886,10 +894,11 @@ where
 {
 }
 
-impl<D, DA> Stream for DataReaderStream<D, DA>
+impl<'de, I, D, DA> Stream for DataReaderStream<D, DA>
 where
   D: Keyed + 'static,
-  DA: DeserializerAdapter<D>,
+  DA: DeserializerAdapter<D, Input = I>,
+  I: Deserialize<'de>,
 {
   type Item = ReadResult<Sample<D, D::K>>;
 
@@ -929,10 +938,11 @@ where
   }
 }
 
-impl<D, DA> FusedStream for DataReaderStream<D, DA>
+impl<'de, I, D, DA> FusedStream for DataReaderStream<D, DA>
 where
   D: Keyed + 'static,
-  DA: DeserializerAdapter<D>,
+  DA: DeserializerAdapter<D, Input = I>,
+  I: Deserialize<'de>,
 {
   fn is_terminated(&self) -> bool {
     false // Never terminate. This means it is always valid to call poll_next().
